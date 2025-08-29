@@ -144,7 +144,7 @@
     <q-dialog
       v-model="scanner.open"
       persistent
-      maximized
+      position="bottom"
       transition-show="scale"
       transition-hide="scale"
     >
@@ -161,18 +161,18 @@
           />
         </q-bar>
         <q-card-section class="q-pa-none">
-          <div style="position: relative; width: 100%; height: calc(100vh - 48px);">
+          <div style="position: relative; width: 360px; height: 260px;">
             <video
               ref="videoEl"
               autoplay
               playsinline
               muted
-              style="width: 100%; height: 100%; object-fit: cover;"
+              style="width: 100%; height: 100%; object-fit: cover; border-radius: 4px;"
             ></video>
             <!-- Orta odak çerçevesi -->
             <div
               class="absolute-center"
-              style="width: 60vmin; height: 60vmin; max-width: 80%; max-height: 80%; pointer-events:none;"
+              style="width: 70%; height: 70%; max-width: 85%; max-height: 85%; pointer-events:none;"
             >
               <div style="position:absolute; inset:0; border:2px solid rgba(0,255,0,0.8); border-radius:8px;"></div>
               <!-- Köşe çizgileri -->
@@ -193,42 +193,7 @@
               >
               </div>
             </div>
-            <div
-              class="absolute-top-left q-ma-sm bg-grey-9 text-white q-pa-xs"
-              style="opacity:.8; border-radius:4px;"
-            >
-              Kamerayı barkoda doğrultun</div>
-            <div
-              class="absolute-top-right q-ma-sm bg-grey-9 text-white q-pa-xs"
-              style="opacity:.9; border-radius:4px; min-width: 260px;"
-            >
-              <div class="row items-center q-gutter-xs">
-                <div class="col">
-                  <q-select
-                    dense
-                    filled
-                    options-dense
-                    emit-value
-                    map-options
-                    v-model="selectedCameraId"
-                    :options="cameras"
-                    option-label="label"
-                    option-value="value"
-                    label="Kamera Seç"
-                    @update:model-value="val => switchCamera(val)"
-                  />
-                </div>
-                <div class="col-auto">
-                  <q-btn
-                    dense
-                    flat
-                    round
-                    icon="refresh"
-                    @click="loadCameras"
-                  />
-                </div>
-              </div>
-            </div>
+            <div class="absolute-top-left q-ma-sm bg-grey-9 text-white q-pa-xs" style="opacity:.8; border-radius:4px;">Kamerayı barkoda doğrultun</div>
           </div>
         </q-card-section>
       </q-card>
@@ -276,6 +241,7 @@ const scanner = reactive({ open: false, mode: 'add' /* 'add' | 'cart' */ })
 const videoEl = ref(null)
 let scanning = false
 let codeReader = null
+let detectLock = false
 
 // Kamera listesi ve seçim
 const cameras = ref([]) // [{ label, value }]
@@ -340,24 +306,7 @@ async function loadCameras() {
   }
 }
 
-async function switchCamera(deviceId) {
-  // seçilen kamerayı ata
-  selectedCameraId.value = deviceId
-  try {
-    // mevcut taramayı durdurup seçilen cihazla tekrar başlat
-    console.debug('[switchCamera] switching to deviceId:', deviceId)
-    codeReader?.reset()
-  } catch (e) {
-    console.debug('[switchCamera] Scanner reset error:', e)
-  }
-  scanning = false
-  try {
-    await startScanner()
-  } catch (e) {
-    console.debug('[switchCamera] startScanner error:', e)
-    $q.notify({ type: 'negative', message: 'Kamera değiştirilemedi. Başka bir cihaz deneyin.' })
-  }
-}
+// Kamera seçicisi kaldırıldı; otomatik kamera seçimi kullanılacak
 
 function openScanner(mode) {
   scanner.mode = mode
@@ -504,10 +453,23 @@ async function startScanner() {
 
 function stopScanner() {
   try {
-    codeReader?.reset()
+    if (codeReader && typeof codeReader.reset === 'function') {
+      codeReader.reset()
+    }
   } catch (e) {
     // kamera/reset esnasında hata oluşsa bile akışı bozmayalım
     console.debug('ZXing reset error:', e)
+  }
+  try {
+    const v = videoEl.value
+    const stream = v?.srcObject
+    const tracks = stream?.getTracks?.() || []
+    tracks.forEach(t => {
+      try { t.stop() } catch (e) { console.debug('track.stop() ignore:', e?.name || e) }
+    })
+    if (v) v.srcObject = null
+  } catch (e) {
+    console.debug('stop tracks ignore:', e?.name || e)
   }
   scanning = false
 }
@@ -516,12 +478,24 @@ onBeforeUnmount(stopScanner)
 
 function onCodeDetected(code) {
   if (!code) return
-  stopScanner()
-  if (scanner.mode === 'add') {
-    createForm.barcode = code
-    $q.notify({ type: 'positive', message: `Barkod okundu: ${code}` })
-  } else {
-    handleCartScan(code)
+  if (detectLock) return
+  detectLock = true
+  try {
+    if (scanner.mode === 'add') {
+      createForm.barcode = code
+      $q.notify({ type: 'positive', message: `Barkod okundu: ${code}` })
+      // Ürün ekle akışında: popup kapat ve kamerayı durdur
+      scanner.open = false
+      stopScanner()
+    } else {
+      // Sepet akışında açık kalsın
+      handleCartScan(code)
+    }
+  } finally {
+    // 1-1.5 sn sonra yeni okumalara izin ver
+    setTimeout(() => { detectLock = false }, 1200)
+    // Sepet modunda siyah ekranı önlemek için oynatmayı zorla
+    if (scanner.mode !== 'add') ensureVideoPlaying()
   }
 }
 
@@ -543,16 +517,23 @@ const endpoints = {
 }
 
 async function submitCreate() {
-  const valid = await createFormRef.value?.validate?.()
+  // QForm.validate yoksa gönderimi engelleme
+  let valid = true
+  const formRef = createFormRef.value
+  if (formRef?.validate) {
+    valid = await formRef.validate()
+  }
   if (!valid) return
   loading.create = true
   try {
     const payload = { barcode: createForm.barcode, name: createForm.name, price: Number(createForm.price) }
     await getApi().post(endpoints.createProduct, payload)
-    $q.notify({ type: 'positive', message: 'Ürün kaydedildi' })
+    $q.notify({ type: 'positive', message: 'Ürün kaydedildi', position: 'bottom', timeout: 2000 })
     createForm.barcode = ''
     createForm.name = ''
     createForm.price = null
+    // Form doğrulama hatalarını da temizle
+    createFormRef.value?.resetValidation?.()
   } catch (e) {
     const msg = e?.response?.data?.message || e.message || 'Kayıt başarısız'
     $q.notify({ type: 'negative', message: msg })
