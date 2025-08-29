@@ -169,6 +169,30 @@
               muted
               style="width: 100%; height: 100%; object-fit: cover;"
             ></video>
+            <!-- Orta odak çerçevesi -->
+            <div
+              class="absolute-center"
+              style="width: 60vmin; height: 60vmin; max-width: 80%; max-height: 80%; pointer-events:none;"
+            >
+              <div style="position:absolute; inset:0; border:2px solid rgba(0,255,0,0.8); border-radius:8px;"></div>
+              <!-- Köşe çizgileri -->
+              <div
+                style="position:absolute; top:-2px; left:-2px; width:20%; height:0; border-top:4px solid rgba(0,255,0,0.9);"
+              >
+              </div>
+              <div
+                style="position:absolute; top:-2px; right:-2px; width:20%; height:0; border-top:4px solid rgba(0,255,0,0.9);"
+              >
+              </div>
+              <div
+                style="position:absolute; bottom:-2px; left:-2px; width:20%; height:0; border-bottom:4px solid rgba(0,255,0,0.9);"
+              >
+              </div>
+              <div
+                style="position:absolute; bottom:-2px; right:-2px; width:20%; height:0; border-bottom:4px solid rgba(0,255,0,0.9);"
+              >
+              </div>
+            </div>
             <div
               class="absolute-top-left q-ma-sm bg-grey-9 text-white q-pa-xs"
               style="opacity:.8; border-radius:4px;"
@@ -364,6 +388,49 @@ function ensureVideoPlaying() {
   }
 }
 
+// Kamera odak/zoom/pozlama ve çözünürlük iyileştirmeleri
+function applyCameraEnhancements() {
+  try {
+    const v = videoEl.value
+    const stream = v?.srcObject
+    const track = stream?.getVideoTracks?.()[0]
+    if (!track) return
+    const caps = track.getCapabilities?.() || {}
+
+    const advanced = []
+    if (Array.isArray(caps.focusMode) && caps.focusMode.includes('continuous')) {
+      advanced.push({ focusMode: 'continuous' })
+    }
+    if (typeof caps.zoom?.max === 'number') {
+      const min = typeof caps.zoom.min === 'number' ? caps.zoom.min : 1
+      const target = Math.min(caps.zoom.max, Math.max(min, (caps.zoom.max + min) / 2))
+      advanced.push({ zoom: target })
+    }
+    if (Array.isArray(caps.exposureMode) && caps.exposureMode.includes('continuous')) {
+      advanced.push({ exposureMode: 'continuous' })
+    }
+    if (Array.isArray(caps.whiteBalanceMode) && caps.whiteBalanceMode.includes('continuous')) {
+      advanced.push({ whiteBalanceMode: 'continuous' })
+    }
+
+    const constraints = {}
+    if (caps.frameRate?.max) constraints.frameRate = { ideal: Math.min(30, caps.frameRate.max) }
+    if (caps.width?.max && caps.height?.max) {
+      constraints.width = { ideal: Math.min(1920, caps.width.max) }
+      constraints.height = { ideal: Math.min(1080, caps.height.max) }
+    }
+    if (advanced.length) constraints.advanced = advanced
+
+    if (Object.keys(constraints).length > 0) {
+      track.applyConstraints(constraints)
+        .then(() => console.debug('[enhance] applied constraints:', constraints))
+        .catch(e => console.debug('[enhance] applyConstraints failed:', e))
+    }
+  } catch (e) {
+    console.debug('[enhance] unexpected error:', e)
+  }
+}
+
 async function startScanner() {
   if (scanning) return
   codeReader = new BrowserMultiFormatReader()
@@ -392,6 +459,7 @@ async function startScanner() {
       console.debug('[startScanner] starting with deviceId:', selectedCameraId.value)
       await codeReader.decodeFromVideoDevice(selectedCameraId.value, videoEl.value, callback)
       ensureVideoPlaying()
+      applyCameraEnhancements()
     } else {
       // Önce arka kamerayı hedefleyen facingMode ile dene
       console.debug('[startScanner] starting with facingMode: environment')
@@ -403,6 +471,7 @@ async function startScanner() {
       // izin alındıysa etiketlerin dolması için listeyi tazele
       loadCameras()
       ensureVideoPlaying()
+      applyCameraEnhancements()
     }
   } catch (err) {
     console.debug('[startScanner] primary start failed:', err)
@@ -420,6 +489,7 @@ async function startScanner() {
       await codeReader.decodeFromVideoDevice(deviceId, videoEl.value, callback)
       loadCameras()
       ensureVideoPlaying()
+      applyCameraEnhancements()
     } catch (e2) {
       scanning = false
       console.debug('[startScanner] fallback failed:', e2)
@@ -486,7 +556,8 @@ async function submitCreate() {
   } catch (e) {
     const msg = e?.response?.data?.message || e.message || 'Kayıt başarısız'
     $q.notify({ type: 'negative', message: msg })
-  } finally {
+  }
+  finally {
     loading.create = false
   }
 }
