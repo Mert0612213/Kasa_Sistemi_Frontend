@@ -18,18 +18,22 @@
       <q-separator />
       <q-card-section>
         <q-form
-          @submit.prevent="submitCreate"
           ref="createFormRef"
           class="q-gutter-md"
         >
           <div class="row q-col-gutter-md">
             <div class="col-12 col-sm-4">
               <q-input
+                ref="createFormRef"
                 v-model="createForm.barcode"
                 label="Barkod"
-                dense
                 outlined
-                :rules="[val => !!val || 'Zorunlu']"
+                dense
+                hide-bottom-space
+                autocomplete="off"
+                autocorrect="off"
+                autocapitalize="off"
+                spellcheck="false"
               />
             </div>
             <div class="col-12 col-sm-4">
@@ -38,7 +42,7 @@
                 label="Ürün Adı"
                 dense
                 outlined
-                :rules="[val => !!val || 'Zorunlu']"
+                hide-bottom-space
               />
             </div>
             <div class="col-12 col-sm-4">
@@ -49,7 +53,7 @@
                 outlined
                 type="number"
                 step="0.01"
-                :rules="[val => val > 0 || '> 0 olmalı']"
+                hide-bottom-space
               />
             </div>
           </div>
@@ -57,9 +61,11 @@
             <div class="col-12">
               <q-btn
                 color="positive"
-                type="submit"
+                type="button"
                 label="Kaydet"
                 :loading="loading.create"
+                :disable="loading.create"
+                @click="submitCreate"
               />
             </div>
           </div>
@@ -193,7 +199,6 @@
               >
               </div>
             </div>
-            <div class="absolute-top-left q-ma-sm bg-grey-9 text-white q-pa-xs" style="opacity:.8; border-radius:4px;">Kamerayı barkoda doğrultun</div>
           </div>
         </q-card-section>
       </q-card>
@@ -242,6 +247,13 @@ const videoEl = ref(null)
 let scanning = false
 let codeReader = null
 let detectLock = false
+let detectedOnce = false
+let lastScannedCode = ''
+let lastScanAt = 0
+let suppressUntil = 0
+let lastSavedCode = ''
+// Kayıt sonrası kısa süreli yok sayma penceresi (eski barkodu görse bile işlememe)
+let sessionIgnore = { code: '', until: 0 }
 
 // Kamera listesi ve seçim
 const cameras = ref([]) // [{ label, value }]
@@ -311,9 +323,26 @@ async function loadCameras() {
 function openScanner(mode) {
   scanner.mode = mode
   scanner.open = true
+  // Guard'ları ve izleri sıfırla
+  detectedOnce = false
+  detectLock = false
+  lastScannedCode = ''
+  lastScanAt = 0
+  // Yeni açılışta eski reader'a bağlı callback kalmasın
+  codeReader = null
+  // Add modunda açarken inputu da boşalt (otofill/kalıntı riskini azalt)
+  if (mode === 'add') {
+    createForm.barcode = ''
+  }
+  // add modunda hem açılış baskılama süresini uzat hem de decoding'i gecikmeli başlat
+  const now = Date.now()
+  suppressUntil = now + (mode === 'add' ? SCAN_CFG.warmupAdd : SCAN_CFG.warmupCart)
   nextTick(async () => {
     await loadCameras()
-    await startScanner()
+    const delay = mode === 'add' ? SCAN_CFG.startDelayAdd : 0
+    setTimeout(async () => {
+      await startScanner()
+    }, delay)
   })
 }
 
@@ -382,6 +411,14 @@ function applyCameraEnhancements() {
 
 async function startScanner() {
   if (scanning) return
+  // Önceki callback'leri tamamen temizle
+  if (codeReader) {
+    try {
+      codeReader.reset()
+    } catch (e) {
+      console.debug('codeReader reset ignore:', e)
+    }
+  }
   codeReader = new BrowserMultiFormatReader()
   scanning = true
   const callback = (result) => {
@@ -405,23 +442,41 @@ async function startScanner() {
       throw new Error('Video elementi hazır değil')
     }
     if (selectedCameraId.value) {
-      console.debug('[startScanner] starting with deviceId:', selectedCameraId.value)
-      await codeReader.decodeFromVideoDevice(selectedCameraId.value, videoEl.value, callback)
-      ensureVideoPlaying()
-      applyCameraEnhancements()
+      // add modunda tek seferlik okuma, cart modunda sürekli tarama
+      if (scanner.mode === 'add') {
+        if (selectedCameraId.value) {
+          const result = await codeReader.decodeOnceFromVideoDevice(selectedCameraId.value, videoEl.value)
+          if (result) callback(result)
+        } else {
+          const result = await codeReader.decodeOnceFromVideoDevice({ facingMode: 'environment' }, videoEl.value)
+          if (result) callback(result)
+        }
+      } else {
+        if (selectedCameraId.value) {
+          await codeReader.decodeFromVideoDevice(selectedCameraId.value, videoEl.value, callback)
+        } else {
+          await codeReader.decodeFromVideoDevice({ facingMode: 'environment' }, videoEl.value, callback)
+        }
+      }
     } else {
-      // Önce arka kamerayı hedefleyen facingMode ile dene
-      console.debug('[startScanner] starting with facingMode: environment')
-      await codeReader.decodeFromConstraints(
-        { video: { facingMode: { ideal: 'environment' } } },
-        videoEl.value,
-        callback
-      )
+      // selectedCameraId yoksa: add modunda tek seferlik okuma, cart modunda sürekli tarama
+      if (scanner.mode === 'add') {
+        console.debug('[startScanner] add mode decodeOnce with facingMode: environment')
+        const result = await codeReader.decodeOnceFromVideoDevice({ facingMode: 'environment' }, videoEl.value)
+        if (result) callback(result)
+      } else {
+        console.debug('[startScanner] cart mode continuous with facingMode: environment')
+        await codeReader.decodeFromConstraints(
+          { video: { facingMode: { ideal: 'environment' } } },
+          videoEl.value,
+          callback
+        )
+      }
       // izin alındıysa etiketlerin dolması için listeyi tazele
       loadCameras()
-      ensureVideoPlaying()
-      applyCameraEnhancements()
     }
+    ensureVideoPlaying()
+    applyCameraEnhancements()
   } catch (err) {
     console.debug('[startScanner] primary start failed:', err)
     try {
@@ -453,37 +508,81 @@ async function startScanner() {
 
 function stopScanner() {
   try {
-    if (codeReader && typeof codeReader.reset === 'function') {
+    if (codeReader) {
+      // Tüm decoding işlemlerini durdur
       codeReader.reset()
+      // Stream'leri de durdur
+      try {
+        codeReader.getVideoInputDevices().then(() => {
+          // Callback temizliği için ek reset
+        }).catch(() => { })
+      } catch (e) {
+        console.debug('device cleanup ignore:', e)
+      }
     }
   } catch (e) {
-    // kamera/reset esnasında hata oluşsa bile akışı bozmayalım
     console.debug('ZXing reset error:', e)
   }
   try {
-    const v = videoEl.value
-    const stream = v?.srcObject
-    const tracks = stream?.getTracks?.() || []
-    tracks.forEach(t => {
-      try { t.stop() } catch (e) { console.debug('track.stop() ignore:', e?.name || e) }
-    })
-    if (v) v.srcObject = null
+    const stream = videoEl.value?.srcObject
+    stream?.getTracks?.().forEach(t => t.stop())
   } catch (e) {
     console.debug('stop tracks ignore:', e?.name || e)
   }
+  // Video elementini tamamen temizle
+  try {
+    const v = videoEl.value
+    if (v) {
+      try { v.pause?.() } catch (e) { console.debug('video pause ignore:', e?.name || e) }
+      // Safari/Chrome uyumu için hem property hem attribute temizliği
+      v.srcObject = null
+      try { v.removeAttribute('srcObject') } catch (e) { console.debug('removeAttribute ignore:', e?.name || e) }
+      try { v.load?.() } catch (e) { console.debug('video load ignore:', e?.name || e) }
+    }
+  } catch (e) {
+    console.debug('video clear ignore:', e?.name || e)
+  }
+  // Güvenlik: kilitleri bırak
+  detectLock = false
+  detectedOnce = false
+  codeReader = null
   scanning = false
 }
 
 onBeforeUnmount(stopScanner)
 
 function onCodeDetected(code) {
+  // Scanner kapalıysa ya da aktif tarama yoksa işlem yapma
+  if (!scanner.open || !scanning) return
   if (!code) return
-  if (detectLock) return
+  if (Date.now() < suppressUntil) return
+  if (detectLock || detectedOnce) return
+  // 'add' modunda aynı barkodu kısa sürede tekrar tetiklemeyi engelle
+  if (scanner.mode === 'add') {
+    const ncode = normalizeCode(code)
+    const nlastSaved = normalizeCode(lastSavedCode)
+    const nlastScanned = normalizeCode(lastScannedCode)
+    // Kayıt sonrası kısa süreli yok sayma penceresi
+    if (sessionIgnore.code && Date.now() < sessionIgnore.until && ncode === sessionIgnore.code) {
+      return
+    }
+    // Son kaydedilen barkodla aynı ise yok say (art arda aynı ürünü yaratmayı önler)
+    if (nlastSaved && ncode === nlastSaved) {
+      return
+    }
+    const now = Date.now()
+    if (ncode === nlastScanned && (now - lastScanAt) < SCAN_CFG.duplicateWindowMs) {
+      return
+    }
+    lastScannedCode = ncode
+    lastScanAt = now
+  }
+  detectedOnce = true
   detectLock = true
   try {
     if (scanner.mode === 'add') {
-      createForm.barcode = code
-      $q.notify({ type: 'positive', message: `Barkod okundu: ${code}` })
+      // Add modunda taramada bildirim göstermiyoruz; sadece formu doldurup kamerayı kapatıyoruz
+      createForm.barcode = normalizeCode(code)
       // Ürün ekle akışında: popup kapat ve kamerayı durdur
       scanner.open = false
       stopScanner()
@@ -516,24 +615,47 @@ const endpoints = {
   getByBarcode: (bc) => `/products/${encodeURIComponent(bc)}`,
 }
 
+function normalizeCode(v) {
+  return String(v ?? '').trim()
+}
+
+// Tarama zamanlama ayarları (kolayca ayarlanabilir)
+const SCAN_CFG = {
+  warmupAdd: 2500,       // ms - add modunda açılıştan sonra okumayı baskıla
+  warmupCart: 1200,      // ms - cart modunda açılıştan sonra baskılama
+  startDelayAdd: 1000,   // ms - add modunda ZXing başlatma gecikmesi
+  duplicateWindowMs: 5000, // ms - aynı barkodu bu süre içinde tekrar görürse yok say
+  reopenDelayMs: 900     // ms - kayıttan sonra tarayıcıyı yeniden açma gecikmesi
+}
+
 async function submitCreate() {
-  // QForm.validate yoksa gönderimi engelleme
-  let valid = true
-  const formRef = createFormRef.value
-  if (formRef?.validate) {
-    valid = await formRef.validate()
+  // Alan başı kırmızı hata göstermemek için manuel doğrulama
+  const b = normalizeCode(createForm.barcode)
+  const n = normalizeCode(createForm.name)
+  const p = Number(createForm.price)
+  if (!b || !n || !(p > 0)) {
+    $q.notify({ type: 'warning', message: 'Lütfen barkod, ürün adı ve 0’dan büyük fiyat girin.' })
+    return
   }
-  if (!valid) return
+  if (loading.create) return
   loading.create = true
   try {
-    const payload = { barcode: createForm.barcode, name: createForm.name, price: Number(createForm.price) }
+    const payload = { barcode: b, name: n, price: p }
     await getApi().post(endpoints.createProduct, payload)
     $q.notify({ type: 'positive', message: 'Ürün kaydedildi', position: 'bottom', timeout: 2000 })
+    // Barkodla ilişiği tamamen kes: bellekte tutma
+    lastSavedCode = ''
+    // Kısa süreli olarak aynı kodu yok say (eski barkod kadrajdaysa tekrar tetiklenmesin)
+    const savedCode = normalizeCode(payload.barcode)
+    sessionIgnore.code = savedCode
+    sessionIgnore.until = Date.now() + SCAN_CFG.duplicateWindowMs
     createForm.barcode = ''
     createForm.name = ''
     createForm.price = null
     // Form doğrulama hatalarını da temizle
     createFormRef.value?.resetValidation?.()
+    await nextTick()
+    // İstek üzerine: Kaydetten sonra kamera popup'ı tekrar açılmasın
   } catch (e) {
     const msg = e?.response?.data?.message || e.message || 'Kayıt başarısız'
     $q.notify({ type: 'negative', message: msg })
@@ -581,8 +703,8 @@ function removeFromCart(barcode) {
 }
 
 function checkout() {
-  $q.dialog({ title: 'Satın Alma', message: 'Satın alma başarılı', ok: 'Tamam' })
   cart.value = []
+  $q.notify({ type: 'positive', message: 'Satın alma başarılı', position: 'bottom', timeout: 2000 })
 }
 
 function currency(v) {
