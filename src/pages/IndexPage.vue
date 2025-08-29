@@ -334,15 +334,11 @@ function openScanner(mode) {
   if (mode === 'add') {
     createForm.barcode = ''
   }
-  // add modunda hem açılış baskılama süresini uzat hem de decoding'i gecikmeli başlat
-  const now = Date.now()
-  suppressUntil = now + (mode === 'add' ? SCAN_CFG.warmupAdd : SCAN_CFG.warmupCart)
+  // Bekleme süresi olmasın: baskılama ve başlangıç gecikmesi kaldırıldı
+  suppressUntil = 0
   nextTick(async () => {
     await loadCameras()
-    const delay = mode === 'add' ? SCAN_CFG.startDelayAdd : 0
-    setTimeout(async () => {
-      await startScanner()
-    }, delay)
+    await startScanner()
   })
 }
 
@@ -557,9 +553,9 @@ function onCodeDetected(code) {
   if (!code) return
   if (Date.now() < suppressUntil) return
   if (detectLock || detectedOnce) return
+  const ncode = normalizeCode(code)
   // 'add' modunda aynı barkodu kısa sürede tekrar tetiklemeyi engelle
   if (scanner.mode === 'add') {
-    const ncode = normalizeCode(code)
     const nlastSaved = normalizeCode(lastSavedCode)
     const nlastScanned = normalizeCode(lastScannedCode)
     // Kayıt sonrası kısa süreli yok sayma penceresi
@@ -576,8 +572,20 @@ function onCodeDetected(code) {
     }
     lastScannedCode = ncode
     lastScanAt = now
+  } else {
+    // cart modunda çoklu okuma var; aynı barkodu çok kısa aralıkta tekrar görürse yok say (farklı barkodlar hemen geçsin)
+    const now = Date.now()
+    if (ncode === lastScannedCode && (now - lastScanAt) < SCAN_CFG.cartDuplicateWindowMs) {
+      return
+    }
+    lastScannedCode = ncode
+    lastScanAt = now
   }
-  detectedOnce = true
+  // Add modunda tek sefer; cart modunda çoklu okuma
+  if (scanner.mode === 'add') {
+    detectedOnce = true
+  }
+  // Kısa süreli kilit (her iki mod için de) tekrar tetiklemeyi önler
   detectLock = true
   try {
     if (scanner.mode === 'add') {
@@ -591,8 +599,9 @@ function onCodeDetected(code) {
       handleCartScan(code)
     }
   } finally {
-    // 1-1.5 sn sonra yeni okumalara izin ver
-    setTimeout(() => { detectLock = false }, 1200)
+    // add: daha güvenli tek tetik; cart: hızlı tekrar okuma için kısa kilit
+    const lockMs = scanner.mode === 'add' ? 1200 : 200
+    setTimeout(() => { detectLock = false }, lockMs)
     // Sepet modunda siyah ekranı önlemek için oynatmayı zorla
     if (scanner.mode !== 'add') ensureVideoPlaying()
   }
@@ -619,13 +628,14 @@ function normalizeCode(v) {
   return String(v ?? '').trim()
 }
 
-// Tarama zamanlama ayarları (kolayca ayarlanabilir)
+// Tarama zamanlama ayarları
 const SCAN_CFG = {
-  warmupAdd: 2500,       // ms - add modunda açılıştan sonra okumayı baskıla
-  warmupCart: 1200,      // ms - cart modunda açılıştan sonra baskılama
-  startDelayAdd: 1000,   // ms - add modunda ZXing başlatma gecikmesi
-  duplicateWindowMs: 5000, // ms - aynı barkodu bu süre içinde tekrar görürse yok say
-  reopenDelayMs: 900     // ms - kayıttan sonra tarayıcıyı yeniden açma gecikmesi
+  warmupAdd: 0,
+  warmupCart: 0,
+  startDelayAdd: 0,
+  duplicateWindowMs: 5000,
+  cartDuplicateWindowMs: 800,
+  reopenDelayMs: 0
 }
 
 async function submitCreate() {
