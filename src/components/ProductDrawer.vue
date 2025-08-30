@@ -75,6 +75,19 @@ function currency(v) {
   return new Intl.NumberFormat('tr-TR', { style: 'currency', currency: 'TRY' }).format(n)
 }
 
+// Güvenli onay: $q.dialog varsa onu kullan, yoksa window.confirm'a düş
+function confirmDialog({ title = 'Onay', message = 'Onaylıyor musunuz?', ok = { label: 'Tamam', color: 'primary' }, cancel = { label: 'Vazgeç' } } = {}) {
+  if ($q && typeof $q.dialog === 'function') {
+    return new Promise((resolve) => {
+      $q.dialog({ title, message, ok, cancel })
+        .onOk(() => resolve(true))
+        .onCancel(() => resolve(false))
+        .onDismiss(() => {})
+    })
+  }
+  return Promise.resolve(window.confirm(message))
+}
+
 async function loadAll() {
   loading.value = true
   try {
@@ -125,13 +138,14 @@ async function saveEdit() {
 }
 
 const deletingKey = ref(null)
-function confirmDelete(p) {
-  $q.dialog({
+async function confirmDelete(p) {
+  const ok = await confirmDialog({
     title: 'Sil',
     message: `${p.name} adlı ürünü silmek istiyor musunuz?`,
     ok: { label: 'Sil', color: 'negative' },
     cancel: { label: 'Vazgeç' }
-  }).onOk(async () => {
+  })
+  if (ok) {
     // Optimistic removal: önce listeden çıkar, sonra API çağır
     const key = (x) => (x.id ?? x.barcode)
     const prev = items.value.slice()
@@ -150,11 +164,10 @@ function confirmDelete(p) {
       // Hata: geri al
       items.value = prev
       $q.notify({ type: 'negative', message: e?.response?.data?.message || e?.message || 'Silme başarısız' })
-    }
-    finally {
+    } finally {
       deletingKey.value = null
     }
-  })
+  }
 }
 
 onMounted(loadAll)
