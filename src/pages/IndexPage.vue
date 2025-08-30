@@ -292,6 +292,11 @@ const recalc = () => {
 const scanner = reactive({ open: false, mode: 'add' /* 'add' | 'cart' */ })
 const videoEl = ref(null)
 let scanning = false
+
+// Barkod takip sistemi
+const visibleBarcodes = ref(new Set()) // Şu anda kamerada görünen barkodlar
+const processedBarcodes = ref(new Set()) // İşlenmiş barkodlar (kameradan çıkana kadar)
+const lastScannedBarcode = ref(null) // Son okunan barkod (geçmiş uyumluluk için korundu)
 let codeReader = null
 let detectLock = false
 let detectedOnce = false
@@ -446,10 +451,11 @@ async function switchCamera(id) {
 function openScanner(mode) {
   scanner.mode = mode
   scanner.open = true
-  // Reset all scanner guards and state
-  detectedOnce = false  // Reset to allow multiple scans when reopened
+  // Tüm tarama korumalarını ve durumlarını sıfırla
+  detectedOnce = false  // Yeniden açıldığında çoklu taramaya izin vermek için sıfırla
   detectLock = false
   lastScannedCode = ''
+  lastScannedBarcode.value = null // Son okunan barkodu temizle
   lastScanAt = 0
   // Yeni açılışta eski reader'a bağlı callback kalmasın
   codeReader = null
@@ -531,8 +537,19 @@ function applyCameraEnhancements() {
   }
 }
 
+async function clearBarcodeTracking() {
+  // Görünür barkodları temizle (zaman aşımı veya kameranın kapanması durumunda)
+  visibleBarcodes.value.clear()
+  // İşlenmiş barkodları temizle
+  processedBarcodes.value.clear()
+}
+
 async function startScanner() {
   if (scanning) return
+  
+  // Önceki taramayı temizle
+  clearBarcodeTracking()
+  
   // Önceki callback'leri tamamen temizle
   if (codeReader) {
     try {
@@ -560,6 +577,29 @@ async function startScanner() {
         try { codeReader?.reset?.() } catch (e) { console.debug('codeReader reset failed:', e) }
         stopScanner()
       }
+    }
+    
+    // Periyodik olarak görünmeyen barkodları temizle
+    const now = Date.now()
+    if (now % 1000 < 100) { // Her saniyede bir çalıştır
+      const currentBarcodes = new Set()
+      // Tüm barkodları topla
+      if (result) {
+        currentBarcodes.add(normalizeCode(result.getText()))
+      }
+      
+      // Görünmeyen barkodları temizle
+      const toRemove = []
+      processedBarcodes.value.forEach(barcode => {
+        if (!currentBarcodes.has(barcode)) {
+          toRemove.push(barcode)
+        }
+      })
+      
+      toRemove.forEach(barcode => {
+        processedBarcodes.value.delete(barcode)
+        visibleBarcodes.value.delete(barcode)
+      })
     }
   }
   // Yalnızca localhost üzerinde çalışma uyarısı
@@ -663,13 +703,40 @@ onBeforeUnmount(() => {
   stopScanner()
 })
 
+// Tarama sıklığını azaltmak için son tarama zamanı
+let lastScanTime = 0
+const SCAN_INTERVAL = 200 // ms
+
 function onCodeDetected(code) {
   // Scanner kapalıysa ya da aktif tarama yoksa işlem yapma
   if (!scanner.open || !scanning) return
   if (!code) return
-  if (Date.now() < suppressUntil) return
+  
+  const now = Date.now()
+  if (now - lastScanTime < SCAN_INTERVAL) return
+  lastScanTime = now
+  
+  if (now < suppressUntil) return
   if (detectLock || detectedOnce) return
+  
   const ncode = normalizeCode(code)
+  lastScannedCode = ncode // Son okunan barkodu güncelle
+  
+  // Eğer bu barkod daha önce işlendiyse ve hala kameradaysa tekrar işleme
+  if (processedBarcodes.value.has(ncode) && visibleBarcodes.value.has(ncode)) {
+    return
+  }
+  
+  // Yeni görünen barkodu işaretle
+  visibleBarcodes.value.add(ncode)
+  
+  // Eğer bu barkod daha önce işlenmediyse işle
+  if (!processedBarcodes.value.has(ncode)) {
+    processedBarcodes.value.add(ncode)
+  } else {
+    return
+  }
+  
   // 'add' modunda aynı barkodu kısa sürede tekrar tetiklemeyi engelle
   if (scanner.mode === 'add') {
     const nlastSaved = normalizeCode(lastSavedCode)
@@ -687,6 +754,7 @@ function onCodeDetected(code) {
       return
     }
     lastScannedCode = ncode
+    lastScannedBarcode.value = ncode // Son okunan barkodu kaydet
     lastScanAt = now
   } else {
     // cart modunda çoklu okuma var; aynı barkodu çok kısa aralıkta tekrar görürse yok say (farklı barkodlar hemen geçsin)
@@ -695,18 +763,21 @@ function onCodeDetected(code) {
       return
     }
     lastScannedCode = ncode
+    lastScannedBarcode.value = ncode // Son okunan barkodu kaydet
     lastScanAt = now
   }
+  
   // Add modunda tek sefer; cart modunda çoklu okuma
   if (scanner.mode === 'add') {
     detectedOnce = true
   }
+  
   // Kısa süreli kilit (her iki mod için de) tekrar tetiklemeyi önler
   detectLock = true
   try {
     if (scanner.mode === 'add') {
       // Add modunda taramada bildirim göstermiyoruz; sadece formu doldurup kamerayı kapatıyoruz
-      createForm.barcode = normalizeCode(code)
+      createForm.barcode = ncode
       // Ürün ekle akışında: popup kapat ve kamerayı durdur
       scanner.open = false
       stopScanner()
@@ -716,8 +787,18 @@ function onCodeDetected(code) {
     }
   } finally {
     // add: daha güvenli tek tetik; cart: hızlı tekrar okuma için kısa kilit
-    const lockMs = scanner.mode === 'add' ? 1200 : 200
-    setTimeout(() => { detectLock = false }, lockMs)
+    const lockMs = scanner.mode === 'add' ? 1200 : 500
+    setTimeout(() => { 
+      detectLock = false
+      // Kilit süresi dolduğunda işlenen barkodları temizleme işlemi
+      // Bu sayede aynı barkod kamerada kaldığı sürece tekrar eklenmez
+      // ancak kameradan çıkarılıp tekrar girilirse okunabilir
+      if (scanner.mode === 'add') {
+        // Add modunda tüm barkodları temizle
+        visibleBarcodes.value.clear()
+        processedBarcodes.value.clear()
+      }
+    }, lockMs)
     // Sepet modunda siyah ekranı önlemek için oynatmayı zorla
     if (scanner.mode !== 'add') ensureVideoPlaying()
   }
