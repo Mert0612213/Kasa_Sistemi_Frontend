@@ -170,11 +170,27 @@
                 <q-item>
                   <q-item-section>Kamera Seç</q-item-section>
                 </q-item>
-                <q-item v-for="cam in cameras" :key="cam.value" clickable v-ripple @click="switchCamera(cam.value)">
-                  <q-item-section avatar>
-                    <q-icon :name="selectedCameraId === cam.value ? 'radio_button_checked' : 'radio_button_unchecked'" />
+                <template v-if="cameras.length > 0">
+                  <q-item 
+                    v-for="cam in cameras" 
+                    :key="cam.value" 
+                    clickable 
+                    v-ripple 
+                    @click="switchCamera(cam.value)"
+                  >
+                    <q-item-section avatar>
+                      <q-icon :name="selectedCameraId === cam.value ? 'radio_button_checked' : 'radio_button_unchecked'" />
+                    </q-item-section>
+                    <q-item-section>{{ cam.label || 'Bilinmeyen Kamera' }}</q-item-section>
+                  </q-item>
+                </template>
+                <q-item v-else>
+                  <q-item-section class="text-italic text-grey">
+                    <div class="row items-center">
+                      <q-icon name="info" class="q-mr-sm" size="1.2em" />
+                      <span>Kamera bulunamadı</span>
+                    </div>
                   </q-item-section>
-                  <q-item-section>{{ cam.label }}</q-item-section>
                 </q-item>
                 <q-separator />
                 <q-item clickable v-ripple @click="mirror = !mirror">
@@ -339,59 +355,70 @@ onMounted(() => {
 
 async function loadCameras() {
   try {
-    const host = window.location.hostname
-    const isLocalhost = host === 'localhost' || host === '127.0.0.1'
-    console.debug('[loadCameras] host:', host, 'isLocalhost:', isLocalhost, 'secure:', window.isSecureContext)
-
-    // 1) İzin durumu (destekleniyorsa) kaydı
+    // 1) Önce kamera iznini al
+    console.debug('[loadCameras] Requesting camera access...')
+    
+    // Mevcut tüm kameraları temizle
+    cameras.value = []
+    
     try {
-      const perm = await (navigator.permissions?.query?.({ name: 'camera' }))
-      if (perm) console.debug('[loadCameras] permission state:', perm.state)
-    } catch (e) {
-      console.debug('[loadCameras] permissions API not available or failed:', e)
-    }
-
-    // 2) Cihazları topla
-    let devicesAll = await navigator.mediaDevices.enumerateDevices()
-    let devices = devicesAll.filter(d => d.kind === 'videoinput')
-    let hasAny = devices.length > 0
-    let hasLabels = hasAny && devices.some(d => d.label && d.label.trim().length > 0)
-    console.debug('[loadCameras] videoinput count:', devices.length, 'hasLabels:', hasLabels)
-
-    // 3) Label yoksa bir defa izin tetikle
-    if (!hasAny || !hasLabels) {
-      try {
-        const tmp = await navigator.mediaDevices.getUserMedia({ video: true })
-        tmp.getTracks().forEach(t => t.stop())
-        devicesAll = await navigator.mediaDevices.enumerateDevices()
-        devices = devicesAll.filter(d => d.kind === 'videoinput')
-        hasAny = devices.length > 0
-        hasLabels = hasAny && devices.some(d => d.label && d.label.trim().length > 0)
-        console.debug('[loadCameras] after permission, videoinput count:', devices.length, 'hasLabels:', hasLabels)
-      } catch (permErr) {
-        console.debug('Kamera izni alınamadı:', permErr)
-        $q.notify({ type: 'warning', message: 'Kamera erişimine izin veriniz' })
+      // Kameraya erişim izni iste
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { 
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          facingMode: { ideal: 'environment' }
+        } 
+      })
+      
+      // İzni aldıktan sonra cihaz listesini al
+      const devicesAll = await navigator.mediaDevices.enumerateDevices()
+      const devices = devicesAll.filter(d => d.kind === 'videoinput')
+      
+      console.debug('[loadCameras] Found video devices:', devices)
+      
+      // Mevcut kameraları güncelle
+      cameras.value = devices.map((d, i) => ({
+        label: d.label || `Kamera ${i + 1}`,
+        value: d.deviceId,
+      }))
+      
+      // Kamera seçimini güncelle
+      if (cameras.value.length > 0) {
+        // Önce seçili kamerayı kontrol et
+        const currentDeviceExists = devices.some(d => d.deviceId === selectedCameraId.value)
+        
+        if (!currentDeviceExists) {
+          // Arka kamerayı bul veya ilk kamerayı seç
+          const backCamera = devices.find(d => /back|rear|environment/i.test(d.label || ''))
+          selectedCameraId.value = backCamera ? backCamera.deviceId : devices[0].deviceId
+          console.debug('[loadCameras] Selected camera:', selectedCameraId.value)
+        }
+      } else {
+        selectedCameraId.value = null
       }
+      
+      // Kullanılmayan stream'i temizle
+      stream.getTracks().forEach(track => track.stop())
+      
+      console.debug('[loadCameras] Camera list updated:', cameras.value)
+      
+    } catch (err) {
+      console.error('Kamera erişim hatası:', err)
+      $q.notify({
+        type: 'negative',
+        message: 'Kameraya erişilemiyor. Lütfen tarayıcı izinlerinizi kontrol edin.',
+        timeout: 3000
+      })
     }
-
-    cameras.value = devices.map((d, i) => ({
-      label: d.label || `Kamera ${i + 1}`,
-      value: d.deviceId,
-    }))
-
-    if (!selectedCameraId.value && cameras.value.length) {
-      // Arka kamerayı tercih et
-      const back = devices.find(d => /back|rear|environment/i.test(d.label))?.deviceId
-      selectedCameraId.value = back || cameras.value[0].value
-    }
-
-    if (cameras.value.length === 0) {
-      console.debug('Kamera listesi boş, ancak taramayı denemeye devam ediyoruz')
-      // Uyarı mesajını kaldırıyoruz çünkü taramayı denemeye devam edeceğiz
-    }
+    
   } catch (e) {
-    console.debug('Kamera listesi alınamadı, ancak taramayı denemeye devam ediyoruz:', e)
-    // Hata olsa bile devam ediyoruz
+    console.error('Kamera yüklenirken hata oluştu:', e)
+    $q.notify({
+      type: 'negative',
+      message: 'Kamera cihazları listelenirken bir hata oluştu.',
+      timeout: 3000
+    })
   }
 }
 
