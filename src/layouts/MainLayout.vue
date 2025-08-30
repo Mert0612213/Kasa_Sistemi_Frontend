@@ -2,9 +2,10 @@
   <q-layout view="lHh Lpr lFf">
     <q-header elevated>
       <q-toolbar class="bg-primary text-white">
+        <q-btn dense flat round icon="menu" @click="drawerOpen = !drawerOpen" />
         <q-toolbar-title>Online Kasa</q-toolbar-title>
         <q-space />
-        <!-- Ses Ayarları -->
+        <!-- Ses Ayarları (sağ üst, beyaz) -->
         <div class="row items-center q-gutter-xs text-white">
           <q-toggle
             v-model="soundEnabled"
@@ -32,6 +33,11 @@
       </q-toolbar>
     </q-header>
 
+    <!-- Sol Çekmece: açılışta kapalı -->
+    <q-drawer v-model="drawerOpen" side="left" bordered>
+      <product-drawer />
+    </q-drawer>
+
     <q-page-container>
       <router-view />
     </q-page-container>
@@ -41,7 +47,9 @@
 
 <script setup>
 import { ref, onMounted, watch } from 'vue'
+import ProductDrawer from 'src/components/ProductDrawer.vue'
 
+const drawerOpen = ref(false)
 const soundEnabled = ref(true)
 const soundVolume = ref(0.7)
 

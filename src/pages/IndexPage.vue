@@ -273,9 +273,20 @@ function loadSoundSettings() {
     }
   } catch (e) { console.debug('loadSoundSettings ignore:', e?.name || e) }
 }
+function handleExternalAddToCart(ev) {
+  try {
+    const p = ev?.detail
+    if (!p) return
+    const prod = { id: p.id ?? null, barcode: String(p.barcode || ''), name: String(p.name || ''), price: Number(p.price || 0) }
+    if (!prod.barcode) return
+    addToCart(prod)
+  } catch (e) { console.debug('add-to-cart listener ignore:', e?.name || e) }
+}
+
 onMounted(() => {
   loadSoundSettings()
   try { window.addEventListener('sound-settings-changed', loadSoundSettings) } catch (e) { console.debug('event add ignore:', e?.name || e) }
+  try { window.addEventListener('add-to-cart', handleExternalAddToCart) } catch (e) { console.debug('event add ignore:', e?.name || e) }
 })
 
 async function loadCameras() {
@@ -567,6 +578,7 @@ function stopScanner() {
 
 onBeforeUnmount(() => {
   try { window.removeEventListener('sound-settings-changed', loadSoundSettings) } catch (e) { console.debug('event remove ignore:', e?.name || e) }
+  try { window.removeEventListener('add-to-cart', handleExternalAddToCart) } catch (e) { console.debug('event remove ignore:', e?.name || e) }
   stopScanner()
 })
 
@@ -644,7 +656,10 @@ import { api } from 'src/boot/axios'
 
 const endpoints = {
   createProduct: '/products',
-  getByBarcode: (bc) => `/products/${encodeURIComponent(bc)}`,
+  getByBarcodePrimary: (bc) => `/products/${encodeURIComponent(bc)}`,
+  getByBarcodeAlt1: (bc) => `/products/by-barcode/${encodeURIComponent(bc)}`,
+  getByBarcodeAlt2: (bc) => `/products/barcode/${encodeURIComponent(bc)}`,
+  getByBarcodeRoot: (bc) => `/${encodeURIComponent(bc)}`,
 }
 
 function normalizeCode(v) {
@@ -698,9 +713,33 @@ async function submitCreate() {
   }
 }
 
+async function fetchByBarcodeWithFallback(bc) {
+  const apiInst = getApi()
+  const paths = [
+    endpoints.getByBarcodePrimary(bc),
+    endpoints.getByBarcodeAlt1(bc),
+    endpoints.getByBarcodeAlt2(bc),
+    endpoints.getByBarcodeRoot(bc),
+  ]
+  let lastErr = null
+  for (const p of paths) {
+    try {
+      const { data } = await apiInst.get(p)
+      return data
+    } catch (e) {
+      lastErr = e
+      if (e?.response?.status && e.response.status !== 404) {
+        // 404 dışındaki hata geldiğinde hemen bırak
+        break
+      }
+    }
+  }
+  throw lastErr || new Error('Ürün bulunamadı')
+}
+
 async function handleCartScan(barcode) {
   try {
-    const { data } = await getApi().get(endpoints.getByBarcode(barcode))
+    const data = await fetchByBarcodeWithFallback(barcode)
     const prod = normalizeProduct(data)
     if (!prod) {
       $q.notify({ type: 'warning', message: 'Bu ürün kayıtlı değil' })
