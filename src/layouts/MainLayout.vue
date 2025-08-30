@@ -1,81 +1,70 @@
 <template>
   <q-layout view="lHh Lpr lFf">
     <q-header elevated>
-      <q-toolbar>
-        <q-btn flat dense round icon="menu" aria-label="Menu" @click="toggleLeftDrawer" />
-
-        <q-toolbar-title> Quasar App </q-toolbar-title>
-
-        <div>Quasar v{{ $q.version }}</div>
+      <q-toolbar class="bg-primary text-white">
+        <q-toolbar-title>Online Kasa</q-toolbar-title>
+        <q-space />
+        <!-- Ses Ayarları -->
+        <div class="row items-center q-gutter-xs text-white">
+          <q-toggle
+            v-model="soundEnabled"
+            label="Ses"
+            dense
+            dark
+            color="white"
+            keep-color
+            @update:model-value="persistSound"
+          />
+          <q-slider
+            v-model="soundVolume"
+            :min="0"
+            :max="1"
+            :step="0.05"
+            dense
+            dark
+            color="white"
+            thumb-color="white"
+            track-color="white"
+            style="width: 140px"
+            @update:model-value="persistSound"
+          />
+        </div>
       </q-toolbar>
     </q-header>
-
-    <q-drawer v-model="leftDrawerOpen" show-if-above bordered>
-      <q-list>
-        <q-item-label header> Essential Links </q-item-label>
-
-        <EssentialLink v-for="link in linksList" :key="link.title" v-bind="link" />
-      </q-list>
-    </q-drawer>
 
     <q-page-container>
       <router-view />
     </q-page-container>
   </q-layout>
+  
 </template>
 
 <script setup>
-import { ref } from 'vue'
-import EssentialLink from 'components/EssentialLink.vue'
+import { ref, onMounted, watch } from 'vue'
 
-const linksList = [
-  {
-    title: 'Docs',
-    caption: 'quasar.dev',
-    icon: 'school',
-    link: 'https://quasar.dev',
-  },
-  {
-    title: 'Github',
-    caption: 'github.com/quasarframework',
-    icon: 'code',
-    link: 'https://github.com/quasarframework',
-  },
-  {
-    title: 'Discord Chat Channel',
-    caption: 'chat.quasar.dev',
-    icon: 'chat',
-    link: 'https://chat.quasar.dev',
-  },
-  {
-    title: 'Forum',
-    caption: 'forum.quasar.dev',
-    icon: 'record_voice_over',
-    link: 'https://forum.quasar.dev',
-  },
-  {
-    title: 'Twitter',
-    caption: '@quasarframework',
-    icon: 'rss_feed',
-    link: 'https://twitter.quasar.dev',
-  },
-  {
-    title: 'Facebook',
-    caption: '@QuasarFramework',
-    icon: 'public',
-    link: 'https://facebook.quasar.dev',
-  },
-  {
-    title: 'Quasar Awesome',
-    caption: 'Community Quasar projects',
-    icon: 'favorite',
-    link: 'https://awesome.quasar.dev',
-  },
-]
+const soundEnabled = ref(true)
+const soundVolume = ref(0.7)
 
-const leftDrawerOpen = ref(false)
-
-function toggleLeftDrawer() {
-  leftDrawerOpen.value = !leftDrawerOpen.value
+function loadSound() {
+  try {
+    const en = localStorage.getItem('sound.enabled')
+    const vol = localStorage.getItem('sound.volume')
+    if (en != null) soundEnabled.value = en === 'true'
+    if (vol != null) {
+      const v = Number(vol)
+      if (!Number.isNaN(v)) soundVolume.value = Math.min(1, Math.max(0, v))
+    }
+  } catch (e) { console.debug('loadSound ignore:', e?.name || e) }
 }
+
+function persistSound() {
+  try {
+    localStorage.setItem('sound.enabled', String(soundEnabled.value))
+    localStorage.setItem('sound.volume', String(soundVolume.value))
+    window.dispatchEvent(new CustomEvent('sound-settings-changed'))
+  } catch (e) { console.debug('persistSound ignore:', e?.name || e) }
+}
+
+onMounted(loadSound)
+watch([soundEnabled, soundVolume], persistSound)
 </script>

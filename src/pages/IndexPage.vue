@@ -207,7 +207,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onBeforeUnmount, nextTick } from 'vue'
+import { ref, reactive, computed, onBeforeUnmount, nextTick, onMounted } from 'vue'
 import { useQuasar } from 'quasar'
 import { BrowserMultiFormatReader } from '@zxing/browser'
 import { DecodeHintType } from '@zxing/library'
@@ -259,6 +259,24 @@ let sessionIgnore = { code: '', until: 0 }
 // Kamera listesi ve seçim
 const cameras = ref([]) // [{ label, value }]
 const selectedCameraId = ref(null)
+
+// Ses ayarları (kalıcı)
+const sound = reactive({ enabled: true, volume: 0.7 })
+function loadSoundSettings() {
+  try {
+    const en = localStorage.getItem('sound.enabled')
+    const vol = localStorage.getItem('sound.volume')
+    if (en != null) sound.enabled = en === 'true'
+    if (vol != null) {
+      const v = Number(vol)
+      if (!Number.isNaN(v)) sound.volume = Math.min(1, Math.max(0, v))
+    }
+  } catch (e) { console.debug('loadSoundSettings ignore:', e?.name || e) }
+}
+onMounted(() => {
+  loadSoundSettings()
+  try { window.addEventListener('sound-settings-changed', loadSoundSettings) } catch (e) { console.debug('event add ignore:', e?.name || e) }
+})
 
 async function loadCameras() {
   try {
@@ -547,7 +565,10 @@ function stopScanner() {
   scanning = false
 }
 
-onBeforeUnmount(stopScanner)
+onBeforeUnmount(() => {
+  try { window.removeEventListener('sound-settings-changed', loadSoundSettings) } catch (e) { console.debug('event remove ignore:', e?.name || e) }
+  stopScanner()
+})
 
 function onCodeDetected(code) {
   // Scanner kapalıysa ya da aktif tarama yoksa işlem yapma
@@ -724,6 +745,8 @@ async function playBeep({ freq = 1000, duration = 200, volume = 0.3 } = {}) {
     if (audioCtx.state === 'suspended') {
       try { await audioCtx.resume() } catch (e) { console.debug('audioCtx.resume (beep) ignore:', e?.name || e) }
     }
+    const effVol = Math.max(0, Math.min(1, (sound.enabled ? sound.volume : 0) * volume))
+    if (effVol <= 0) return
     const osc = audioCtx.createOscillator()
     const gain = audioCtx.createGain()
     osc.type = 'square'
@@ -733,8 +756,8 @@ async function playBeep({ freq = 1000, duration = 200, volume = 0.3 } = {}) {
     const attack = 0.005
     const release = 0.04
     gain.gain.setValueAtTime(0, now)
-    gain.gain.linearRampToValueAtTime(volume, now + attack)
-    gain.gain.setValueAtTime(volume, now + (duration / 1000) - release)
+    gain.gain.linearRampToValueAtTime(effVol, now + attack)
+    gain.gain.setValueAtTime(effVol, now + (duration / 1000) - release)
     gain.gain.linearRampToValueAtTime(0, now + (duration / 1000))
     osc.connect(gain)
     gain.connect(audioCtx.destination)
