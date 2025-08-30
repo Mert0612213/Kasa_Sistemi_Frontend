@@ -158,6 +158,36 @@
         <q-bar class="bg-grey-9 text-white">
           <div>{{ scanner.mode === 'add' ? 'Ürün Ekle - Barkod Tara' : 'Sepet - Barkod Tara' }}</div>
           <q-space />
+          <!-- Kamera Ayarları Menüsü (3 nokta) -->
+          <q-btn dense flat round icon="more_vert">
+            <q-menu anchor="bottom right" self="top right">
+              <q-list style="min-width: 240px">
+                <q-item clickable v-ripple @click="refreshCameras">
+                  <q-item-section avatar><q-icon name="refresh" /></q-item-section>
+                  <q-item-section>Kameraları Yenile</q-item-section>
+                </q-item>
+                <q-separator />
+                <q-item>
+                  <q-item-section>Kamera Seç</q-item-section>
+                </q-item>
+                <q-item v-for="cam in cameras" :key="cam.value" clickable v-ripple @click="switchCamera(cam.value)">
+                  <q-item-section avatar>
+                    <q-icon :name="selectedCameraId === cam.value ? 'radio_button_checked' : 'radio_button_unchecked'" />
+                  </q-item-section>
+                  <q-item-section>{{ cam.label }}</q-item-section>
+                </q-item>
+                <q-separator />
+                <q-item clickable v-ripple @click="mirror = !mirror">
+                  <q-item-section avatar><q-icon :name="mirror ? 'toggle_on' : 'toggle_off'" /></q-item-section>
+                  <q-item-section>Ayna (Yatay çevir)</q-item-section>
+                </q-item>
+                <q-item clickable v-ripple @click="rotate180 = !rotate180">
+                  <q-item-section avatar><q-icon :name="rotate180 ? 'toggle_on' : 'toggle_off'" /></q-item-section>
+                  <q-item-section>Ters Çevir (180°)</q-item-section>
+                </q-item>
+              </q-list>
+            </q-menu>
+          </q-btn>
           <q-btn
             dense
             flat
@@ -173,7 +203,7 @@
               autoplay
               playsinline
               muted
-              style="width: 100%; height: 100%; object-fit: cover; border-radius: 4px;"
+              :style="videoStyle"
             ></video>
             <!-- Orta odak çerçevesi -->
             <div
@@ -259,6 +289,23 @@ let sessionIgnore = { code: '', until: 0 }
 // Kamera listesi ve seçim
 const cameras = ref([]) // [{ label, value }]
 const selectedCameraId = ref(null)
+const mirror = ref(false)
+const rotate180 = ref(false)
+
+const videoStyle = computed(() => {
+  const base = {
+    width: '100%',
+    height: '100%',
+    objectFit: 'cover',
+    borderRadius: '4px',
+  }
+  const sx = mirror.value ? -1 : 1
+  const rot = rotate180.value ? '180deg' : '0deg'
+  return {
+    ...base,
+    transform: `scaleX(${sx}) rotate(${rot})`,
+  }
+})
 
 // Ses ayarları (kalıcı)
 const sound = reactive({ enabled: true, volume: 0.7 })
@@ -339,13 +386,31 @@ async function loadCameras() {
     }
 
     if (cameras.value.length === 0) {
-      const msg = isLocalhost
-        ? 'Kamera bulunamadı. Tarayıcı izinlerini kontrol edin.'
-        : 'Güvenli olmayan kaynak. Kamerayı yalnızca http://localhost üzerinde deneyin.'
-      $q.notify({ type: 'warning', message: msg })
+      console.debug('Kamera listesi boş, ancak taramayı denemeye devam ediyoruz')
+      // Uyarı mesajını kaldırıyoruz çünkü taramayı denemeye devam edeceğiz
     }
   } catch (e) {
-    console.debug('Kamera listesi alınamadı:', e)
+    console.debug('Kamera listesi alınamadı, ancak taramayı denemeye devam ediyoruz:', e)
+    // Hata olsa bile devam ediyoruz
+  }
+}
+
+// Kamera listesi yenile
+async function refreshCameras() {
+  await loadCameras()
+}
+
+// Kamera değiştir ve taramayı güvenle yeniden başlat
+async function switchCamera(id) {
+  try {
+    if (selectedCameraId.value === id) return
+    selectedCameraId.value = id
+    stopScanner()
+    await nextTick()
+    await startScanner()
+  } catch (e) {
+    console.debug('switchCamera failed:', e)
+    $q.notify({ type: 'negative', message: 'Kamera değiştirilemedi' })
   }
 }
 
@@ -354,8 +419,8 @@ async function loadCameras() {
 function openScanner(mode) {
   scanner.mode = mode
   scanner.open = true
-  // Guard'ları ve izleri sıfırla
-  detectedOnce = false
+  // Reset all scanner guards and state
+  detectedOnce = false  // Reset to allow multiple scans when reopened
   detectLock = false
   lastScannedCode = ''
   lastScanAt = 0
@@ -371,6 +436,7 @@ function openScanner(mode) {
   ensureAudioReady()
   nextTick(async () => {
     await loadCameras()
+    // Kamera listesi kontrolü artık loadCameras içinde yapılıyor
     await startScanner()
   })
 }
@@ -462,6 +528,11 @@ async function startScanner() {
     if (result) {
       const code = result.getText()
       onCodeDetected(code)
+      // add modunda ilk sonuçtan sonra durdur
+      if (scanner.mode === 'add') {
+        try { codeReader?.reset?.() } catch (e) { console.debug('codeReader reset failed:', e) }
+        stopScanner()
+      }
     }
   }
   // Yalnızca localhost üzerinde çalışma uyarısı
@@ -478,56 +549,38 @@ async function startScanner() {
       console.debug('[startScanner] video element not ready')
       throw new Error('Video elementi hazır değil')
     }
-    if (selectedCameraId.value) {
-      // add modunda tek seferlik okuma, cart modunda sürekli tarama
-      if (scanner.mode === 'add') {
-        if (selectedCameraId.value) {
-          const result = await codeReader.decodeOnceFromVideoDevice(selectedCameraId.value, videoEl.value)
-          if (result) callback(result)
-        } else {
-          const result = await codeReader.decodeOnceFromVideoDevice({ facingMode: 'environment' }, videoEl.value)
-          if (result) callback(result)
-        }
-      } else {
-        if (selectedCameraId.value) {
-          await codeReader.decodeFromVideoDevice(selectedCameraId.value, videoEl.value, callback)
-        } else {
-          await codeReader.decodeFromVideoDevice({ facingMode: 'environment' }, videoEl.value, callback)
-        }
-      }
-    } else {
-      // selectedCameraId yoksa: add modunda tek seferlik okuma, cart modunda sürekli tarama
-      if (scanner.mode === 'add') {
-        console.debug('[startScanner] add mode decodeOnce with facingMode: environment')
-        const result = await codeReader.decodeOnceFromVideoDevice({ facingMode: 'environment' }, videoEl.value)
-        if (result) callback(result)
-      } else {
-        console.debug('[startScanner] cart mode continuous with facingMode: environment')
-        await codeReader.decodeFromConstraints(
-          { video: { facingMode: { ideal: 'environment' } } },
-          videoEl.value,
-          callback
-        )
-      }
-      // izin alındıysa etiketlerin dolması için listeyi tazele
-      loadCameras()
-    }
+    // Seçilmiş cihaz listede mi kontrol et
+    const deviceExists = Array.isArray(cameras.value) && cameras.value.some(c => c.value === selectedCameraId.value)
+    const deviceIdToUse = deviceExists ? selectedCameraId.value : null
+    // Seçilmiş kamera varsa deviceId, yoksa facingMode ile ilerle
+    const constraints = deviceIdToUse
+      ? { video: { deviceId: { exact: deviceIdToUse } } }
+      : { video: { facingMode: { ideal: 'environment' } } }
+    console.debug('[startScanner] using constraints:', constraints)
+    await codeReader.decodeFromConstraints(constraints, videoEl.value, callback)
+    // izin alındıysa etiketlerin dolması için listeyi tazele
+    loadCameras()
     ensureVideoPlaying()
     applyCameraEnhancements()
   } catch (err) {
     console.debug('[startScanner] primary start failed:', err)
     try {
-      // Fallback: cihaz listesinden arka kamerayı bul
-      const devices = await BrowserMultiFormatReader.listVideoInputDevices()
-      if (!devices || devices.length === 0) {
-        throw new Error('Kamera bulunamadı')
+      // Fallback: önce facingMode, o da olmazsa en genel { video: true }
+      console.debug('[startScanner] fallback with facingMode environment')
+      try {
+        await codeReader.decodeFromConstraints(
+          { video: { facingMode: { ideal: 'environment' } } },
+          videoEl.value,
+          callback
+        )
+      } catch (eFacing) {
+        console.debug('[startScanner] facingMode fallback failed, trying { video: true }', eFacing)
+        await codeReader.decodeFromConstraints(
+          { video: true },
+          videoEl.value,
+          callback
+        )
       }
-      let deviceId = selectedCameraId.value
-      if (!deviceId) deviceId = devices.find(d => /back|rear|environment/i.test(d.label))?.deviceId
-      if (!deviceId) deviceId = devices[devices.length - 1].deviceId
-      selectedCameraId.value = deviceId
-      console.debug('[startScanner] fallback starting with deviceId:', deviceId)
-      await codeReader.decodeFromVideoDevice(deviceId, videoEl.value, callback)
       loadCameras()
       ensureVideoPlaying()
       applyCameraEnhancements()
