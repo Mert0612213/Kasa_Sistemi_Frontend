@@ -81,6 +81,19 @@
       <q-card-section class="row items-center q-gutter-sm">
         <div class="text-h6">Sepet</div>
         <q-space />
+        <q-input
+          v-model="searchTerm"
+          outlined
+          dense
+          placeholder="Ürün ara..."
+          class="q-mr-sm"
+          style="min-width: 200px;"
+          clearable
+        >
+          <template v-slot:prepend>
+            <q-icon name="search" />
+          </template>
+        </q-input>
         <q-btn
           color="primary"
           icon="qr_code"
@@ -92,7 +105,7 @@
       <q-card-section>
         <q-table
           title="Sepet"
-          :rows="cart"
+          :rows="filteredCart"
           :columns="columns"
           row-key="barcode"
           flat
@@ -272,8 +285,32 @@ const createForm = reactive({
 
 const loading = reactive({ create: false })
 
+// Arama terimi
+const searchTerm = ref('')
+
 // Sepet
 const cart = ref([]) // { id, barcode, name, price, qty }
+
+// Filtrelenmiş sepet
+const filteredCart = computed(() => {
+  if (!searchTerm.value) return cart.value
+  
+  const normalizeText = (text) => {
+    return String(text || '')
+      .toLocaleLowerCase('tr-TR')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+  }
+  
+  const term = normalizeText(searchTerm.value)
+  
+  return cart.value.filter(item => {
+    return (
+      normalizeText(item.name).includes(term) ||
+      normalizeText(item.barcode).includes(term)
+    )
+  })
+})
 const columns = [
   { name: 'barcode', label: 'Barkod', field: 'barcode', align: 'left' },
   { name: 'name', label: 'Ürün', field: 'name', align: 'left' },
@@ -298,6 +335,8 @@ const visibleBarcodes = ref(new Set()) // Şu anda kamerada görünen barkodlar
 const processedBarcodes = ref(new Set()) // İşlenmiş barkodlar (kameradan çıkana kadar)
 const lastScannedBarcode = ref(null) // Son okunan barkod (geçmiş uyumluluk için korundu)
 let codeReader = null
+// Kamerada son görüldüğü zamanı tut (ms)
+const lastSeenAt = ref(new Map())
 let detectLock = false
 let detectedOnce = false
 let lastScannedCode = ''
@@ -306,6 +345,8 @@ let suppressUntil = 0
 let lastSavedCode = ''
 // Kayıt sonrası kısa süreli yok sayma penceresi (eski barkodu görse bile işlememe)
 let sessionIgnore = { code: '', until: 0 }
+// Kamera oturumu başlangıç zamanı
+let sessionStartedAt = 0
 
 // Kamera listesi ve seçim
 const cameras = ref([]) // [{ label, value }]
@@ -538,10 +579,10 @@ function applyCameraEnhancements() {
 }
 
 async function clearBarcodeTracking() {
-  // Görünür barkodları temizle (zaman aşımı veya kameranın kapanması durumunda)
+  // Kamerayı açarken sadece görünürlük ve zaman izlerini temizle
   visibleBarcodes.value.clear()
-  // İşlenmiş barkodları temizle
-  processedBarcodes.value.clear()
+  lastSeenAt.value.clear()
+  // processedBarcodes BİLEREK temizlenmiyor; böylece kamera kapat/aç ile tekrar okuma olmaz
 }
 
 async function startScanner() {
@@ -549,6 +590,7 @@ async function startScanner() {
   
   // Önceki taramayı temizle
   clearBarcodeTracking()
+  sessionStartedAt = Date.now()
   
   // Önceki callback'leri tamamen temizle
   if (codeReader) {
@@ -579,27 +621,30 @@ async function startScanner() {
       }
     }
     
-    // Periyodik olarak görünmeyen barkodları temizle
+    // Periyodik olarak kadrajdan çıkan barkodları zaman aşımı ile temizle
     const now = Date.now()
-    if (now % 1000 < 100) { // Her saniyede bir çalıştır
-      const currentBarcodes = new Set()
-      // Tüm barkodları topla
-      if (result) {
-        currentBarcodes.add(normalizeCode(result.getText()))
+    const GONE_TIMEOUT = 1200 // ms: bu süre boyunca görülmeyen barkod kadrajdan çıkmış sayılır
+    if (now % 300 < 60) { // ~300ms'de bir hafif kontrol
+      const expired = []
+      lastSeenAt.value.forEach((ts, bc) => {
+        if (now - ts > GONE_TIMEOUT) expired.push(bc)
+      })
+      if (expired.length) {
+        expired.forEach(bc => {
+          lastSeenAt.value.delete(bc)
+          visibleBarcodes.value.delete(bc)
+          processedBarcodes.value.delete(bc)
+        })
       }
-      
-      // Görünmeyen barkodları temizle
-      const toRemove = []
-      processedBarcodes.value.forEach(barcode => {
-        if (!currentBarcodes.has(barcode)) {
-          toRemove.push(barcode)
-        }
-      })
-      
-      toRemove.forEach(barcode => {
-        processedBarcodes.value.delete(barcode)
-        visibleBarcodes.value.delete(barcode)
-      })
+      // Bu oturumda hiç görülmeyen (lastSeenAt'te olmayan) eski processed barkodları da
+      // oturum başlangıcından GONE_TIMEOUT sonra temizle (kamera aç-kapatta yeniden okuma olmasın)
+      if (sessionStartedAt && (now - sessionStartedAt) > GONE_TIMEOUT) {
+        const toDrop = []
+        processedBarcodes.value.forEach(bc => {
+          if (!lastSeenAt.value.has(bc)) toDrop.push(bc)
+        })
+        toDrop.forEach(bc => processedBarcodes.value.delete(bc))
+      }
     }
   }
   // Yalnızca localhost üzerinde çalışma uyarısı
@@ -705,7 +750,7 @@ onBeforeUnmount(() => {
 
 // Tarama sıklığını azaltmak için son tarama zamanı
 let lastScanTime = 0
-const SCAN_INTERVAL = 200 // ms
+const SCAN_INTERVAL = 500 // ms (0.5 saniye)
 
 function onCodeDetected(code) {
   // Scanner kapalıysa ya da aktif tarama yoksa işlem yapma
@@ -724,11 +769,15 @@ function onCodeDetected(code) {
   
   // Eğer bu barkod daha önce işlendiyse ve hala kameradaysa tekrar işleme
   if (processedBarcodes.value.has(ncode) && visibleBarcodes.value.has(ncode)) {
+    // Yine de son görüldü zamanını tazele
+    lastSeenAt.value.set(ncode, now)
     return
   }
   
   // Yeni görünen barkodu işaretle
   visibleBarcodes.value.add(ncode)
+  // Son görüldü zamanını güncelle
+  lastSeenAt.value.set(ncode, now)
   
   // Eğer bu barkod daha önce işlenmediyse işle
   if (!processedBarcodes.value.has(ncode)) {
@@ -790,13 +839,10 @@ function onCodeDetected(code) {
     const lockMs = scanner.mode === 'add' ? 1200 : 500
     setTimeout(() => { 
       detectLock = false
-      // Kilit süresi dolduğunda işlenen barkodları temizleme işlemi
-      // Bu sayede aynı barkod kamerada kaldığı sürece tekrar eklenmez
-      // ancak kameradan çıkarılıp tekrar girilirse okunabilir
+      // Add modunda processedBarcodes'ı temizlemiyoruz; sadece görünürlük/zaman izleri
       if (scanner.mode === 'add') {
-        // Add modunda tüm barkodları temizle
         visibleBarcodes.value.clear()
-        processedBarcodes.value.clear()
+        lastSeenAt.value.clear()
       }
     }, lockMs)
     // Sepet modunda siyah ekranı önlemek için oynatmayı zorla
