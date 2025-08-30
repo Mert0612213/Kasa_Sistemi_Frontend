@@ -44,7 +44,7 @@
       v-model="drawerOpen"
       side="left"
       bordered
-      :width="400"
+      :width="360"
     >
       <product-drawer />
     </q-drawer>

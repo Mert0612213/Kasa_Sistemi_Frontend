@@ -279,7 +279,8 @@ function handleExternalAddToCart(ev) {
     if (!p) return
     const prod = { id: p.id ?? null, barcode: String(p.barcode || ''), name: String(p.name || ''), price: Number(p.price || 0) }
     if (!prod.barcode) return
-    addToCart(prod)
+    // Çekmeceden eklemede sessiz (beep yok)
+    addToCart(prod, false)
   } catch (e) { console.debug('add-to-cart listener ignore:', e?.name || e) }
 }
 
@@ -842,12 +843,12 @@ function playSuccess() {
   }
 }
 
-function addToCart(prod) {
+function addToCart(prod, playSound = true) {
   const existing = cart.value.find((x) => x.barcode === prod.barcode)
   if (existing) existing.qty += 1
   else cart.value.push({ ...prod, qty: 1 })
-  // Sepete eklendiğinde kısa beep sesi
-  playBeep()
+  // Sadece istenirse kısa beep sesi çal
+  if (playSound) playBeep()
 }
 
 function removeFromCart(barcode) {
