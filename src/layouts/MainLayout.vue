@@ -2,7 +2,13 @@
   <q-layout view="lHh Lpr lFf">
     <q-header elevated>
       <q-toolbar class="bg-primary text-white">
-        <q-btn dense flat round icon="menu" @click="drawerOpen = !drawerOpen" />
+        <q-btn
+          dense
+          flat
+          round
+          icon="menu"
+          @click="drawerOpen = !drawerOpen"
+        />
         <q-toolbar-title>Online Kasa</q-toolbar-title>
         <q-space />
         <!-- Ses Ayarları (sağ üst, beyaz) -->
@@ -33,8 +39,13 @@
       </q-toolbar>
     </q-header>
 
-    <!-- Sol Çekmece: açılışta kapalı -->
-    <q-drawer v-model="drawerOpen" side="left" bordered>
+    <!-- Sol Çekmece: açılışta kapalı; genişlik artırıldı -->
+    <q-drawer
+      v-model="drawerOpen"
+      side="left"
+      bordered
+      :width="400"
+    >
       <product-drawer />
     </q-drawer>
 
@@ -42,7 +53,7 @@
       <router-view />
     </q-page-container>
   </q-layout>
-  
+
 </template>
 
 <script setup>
