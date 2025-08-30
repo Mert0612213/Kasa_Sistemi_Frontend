@@ -210,6 +210,7 @@
 import { ref, reactive, computed, onBeforeUnmount, nextTick } from 'vue'
 import { useQuasar } from 'quasar'
 import { BrowserMultiFormatReader } from '@zxing/browser'
+import { DecodeHintType } from '@zxing/library'
 
 // Axios instance (boot/axios.js -> this.$api)
 // Laravel varsayılanı: http://localhost:8000/api
@@ -336,6 +337,8 @@ function openScanner(mode) {
   }
   // Bekleme süresi olmasın: baskılama ve başlangıç gecikmesi kaldırıldı
   suppressUntil = 0
+  // Kullanıcı etkileşiminde ses altyapısını hazırla (autoplay kısıtları için)
+  ensureAudioReady()
   nextTick(async () => {
     await loadCameras()
     await startScanner()
@@ -415,7 +418,15 @@ async function startScanner() {
       console.debug('codeReader reset ignore:', e)
     }
   }
-  codeReader = new BrowserMultiFormatReader()
+  // Farklı yön/orientation ve ters renklerde (inverted) daha dayanıklı okuma için ipuçları
+  const hints = new Map()
+  try {
+    hints.set(DecodeHintType.TRY_HARDER, true)
+    hints.set(DecodeHintType.ALSO_INVERTED, true)
+  } catch (e) {
+    console.debug('hints set ignore:', e?.name || e)
+  }
+  codeReader = new BrowserMultiFormatReader(hints)
   scanning = true
   const callback = (result) => {
     if (result) {
@@ -504,17 +515,8 @@ async function startScanner() {
 
 function stopScanner() {
   try {
-    if (codeReader) {
-      // Tüm decoding işlemlerini durdur
+    if (codeReader && typeof codeReader.reset === 'function') {
       codeReader.reset()
-      // Stream'leri de durdur
-      try {
-        codeReader.getVideoInputDevices().then(() => {
-          // Callback temizliği için ek reset
-        }).catch(() => { })
-      } catch (e) {
-        console.debug('device cleanup ignore:', e)
-      }
     }
   } catch (e) {
     console.debug('ZXing reset error:', e)
@@ -702,10 +704,88 @@ function normalizeProduct(data) {
   return { id: d.id ?? null, barcode: String(d.barcode), name: String(d.name), price: Number(d.price) }
 }
 
+// Basit beep sesi (Web Audio API)
+let audioCtx = null
+function ensureAudioReady() {
+  try {
+    if (!audioCtx) {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)()
+    }
+    if (audioCtx && audioCtx.state === 'suspended') {
+      audioCtx.resume().catch((e) => { console.debug('audioCtx.resume ignore:', e?.name || e) })
+    }
+  } catch (e) {
+    console.debug('ensureAudioReady ignore:', e?.name || e)
+  }
+}
+async function playBeep({ freq = 1000, duration = 200, volume = 0.3 } = {}) {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)()
+    if (audioCtx.state === 'suspended') {
+      try { await audioCtx.resume() } catch (e) { console.debug('audioCtx.resume (beep) ignore:', e?.name || e) }
+    }
+    const osc = audioCtx.createOscillator()
+    const gain = audioCtx.createGain()
+    osc.type = 'square'
+    osc.frequency.setValueAtTime(freq, audioCtx.currentTime)
+    // kısa bir envelope ile aç/kapa klik sesini azalt
+    const now = audioCtx.currentTime
+    const attack = 0.005
+    const release = 0.04
+    gain.gain.setValueAtTime(0, now)
+    gain.gain.linearRampToValueAtTime(volume, now + attack)
+    gain.gain.setValueAtTime(volume, now + (duration / 1000) - release)
+    gain.gain.linearRampToValueAtTime(0, now + (duration / 1000))
+    osc.connect(gain)
+    gain.connect(audioCtx.destination)
+    osc.start(now)
+    osc.stop(now + duration / 1000)
+  } catch {
+    // sessizce geç
+  }
+}
+
+// Satın alma için kısa başarı melodisi (daha yüksek ve belirgin)
+function playSuccess() {
+  try {
+    ensureAudioReady()
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)()
+    const now = audioCtx.currentTime
+    // Master gain (genel ses yüksekliği)
+    const master = audioCtx.createGain()
+    master.gain.value = 0.9
+    master.connect(audioCtx.destination)
+
+    const tones = [
+      { f: 880, d: 0.22, v: 0.8, o: 0 },
+      { f: 1320, d: 0.28, v: 0.8, o: 0.12 },
+      { f: 1760, d: 0.20, v: 0.7, o: 0.28 },
+    ]
+    tones.forEach(t => {
+      const osc = audioCtx.createOscillator()
+      const gain = audioCtx.createGain()
+      osc.type = 'square'
+      osc.frequency.setValueAtTime(t.f, now + t.o)
+      // envelope (hızlı attack, kısa release)
+      gain.gain.setValueAtTime(0, now + t.o)
+      gain.gain.linearRampToValueAtTime(t.v, now + t.o + 0.01)
+      gain.gain.linearRampToValueAtTime(0, now + t.o + t.d)
+      osc.connect(gain)
+      gain.connect(master)
+      osc.start(now + t.o)
+      osc.stop(now + t.o + t.d)
+    })
+  } catch (e) {
+    console.debug('playSuccess ignore:', e?.name || e)
+  }
+}
+
 function addToCart(prod) {
   const existing = cart.value.find((x) => x.barcode === prod.barcode)
   if (existing) existing.qty += 1
   else cart.value.push({ ...prod, qty: 1 })
+  // Sepete eklendiğinde kısa beep sesi
+  playBeep()
 }
 
 function removeFromCart(barcode) {
@@ -713,6 +793,8 @@ function removeFromCart(barcode) {
 }
 
 function checkout() {
+  // Başarı sesi
+  playSuccess()
   cart.value = []
   $q.notify({ type: 'positive', message: 'Satın alma başarılı', position: 'bottom', timeout: 2000 })
 }
